@@ -1,0 +1,13 @@
+# Configuration for select_diverse_segments.py
+# Format: key=value
+
+input_csv=\\Lab\Groups\Wetlands\Working\ProjectWork\HABIT\TestCases\HABIT_segmentation\03_outputs\sampling\cluster_method\segment_features_for_clustering.csv
+output_dir=\\Lab\Groups\Wetlands\Working\ProjectWork\HABIT\TestCases\HABIT_segmentation\03_outputs\sampling\diverse_method
+feature_cols=brightness_mean_z,rg_contrast_mean_z,texture_mean_z,ndvi_mean_z,ndwi_mean_z
+mode=hybrid
+n_diverse=50
+n_dense=100
+dense_k=10
+dense_candidate_percentile=0.85
+dense_min_distance_quantile=0.5
+output_vector=diverse_segments.shp

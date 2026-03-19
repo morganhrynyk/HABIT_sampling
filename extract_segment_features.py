@@ -17,8 +17,8 @@ CHIP_ROOT_PATTERN = re.compile(r"(chip_r\d+_c\d+_\d+)", re.IGNORECASE)
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Extract per-segment brightness/texture/NDVI/rg_contrast means from "
-            "nested rasters and write a table ready for clustering."
+            "Extract per-segment brightness/texture/NDVI/NDWI/rg_contrast means "
+            "from nested rasters and write a table ready for clustering."
         )
     )
     parser.add_argument(
@@ -56,6 +56,12 @@ def parse_args() -> argparse.Namespace:
         default=8,
         help="Minimum in-segment pixels required to compute features.",
     )
+    parser.add_argument(
+        "--max-plot-points",
+        type=int,
+        default=12000,
+        help="Maximum rows to use in the feature comparison figure.",
+    )
     return parser.parse_args()
 
 
@@ -90,6 +96,8 @@ def identify_feature_type(path: Path) -> str | None:
         return "rg_contrast"
     if "texture" in text:
         return "texture"
+    if "ndwi" in text:
+        return "ndwi"
     if "ndvi" in text:
         return "ndvi"
     return None
@@ -132,6 +140,7 @@ def process_chip(
     rg_contrast_path: Path,
     texture_path: Path,
     ndvi_path: Path,
+    ndwi_path: Path,
     args: argparse.Namespace,
 ) -> pd.DataFrame:
     gdf = gpd.read_file(shp_path)
@@ -144,21 +153,24 @@ def process_chip(
     )
     texture, _, texture_shape, texture_transform = read_first_band(texture_path)
     ndvi, _, ndvi_shape, ndvi_transform = read_first_band(ndvi_path)
+    ndwi, _, ndwi_shape, ndwi_transform = read_first_band(ndwi_path)
 
     if (
         rg_contrast_shape != shape
         or texture_shape != shape
         or ndvi_shape != shape
+        or ndwi_shape != shape
     ):
         raise ValueError(
             f"Raster size mismatch for {shp_path.stem}: "
             f"brightness={shape}, rg_contrast={rg_contrast_shape}, "
-            f"texture={texture_shape}, ndvi={ndvi_shape}"
+            f"texture={texture_shape}, ndvi={ndvi_shape}, ndwi={ndwi_shape}"
         )
     if (
         rg_contrast_transform != transform
         or texture_transform != transform
         or ndvi_transform != transform
+        or ndwi_transform != transform
     ):
         raise ValueError(
             f"Raster transform mismatch for {shp_path.stem}. "
@@ -187,11 +199,13 @@ def process_chip(
         r_vals = rg_contrast[seg_mask]
         t_vals = texture[seg_mask]
         n_vals = ndvi[seg_mask]
+        w_vals = ndwi[seg_mask]
         if (
             np.all(np.isnan(b_vals))
             or np.all(np.isnan(r_vals))
             or np.all(np.isnan(t_vals))
             or np.all(np.isnan(n_vals))
+            or np.all(np.isnan(w_vals))
         ):
             continue
 
@@ -210,11 +224,13 @@ def process_chip(
                 "rg_contrast_raster": str(rg_contrast_path),
                 "texture_raster": str(texture_path),
                 "ndvi_raster": str(ndvi_path),
+                "ndwi_raster": str(ndwi_path),
                 "segment_area_m2": float(pixels * pixel_area_m2),
                 "brightness_mean": float(np.nanmean(b_vals)),
                 "rg_contrast_mean": float(np.nanmean(r_vals)),
                 "texture_mean": float(np.nanmean(t_vals)),
                 "ndvi_mean": float(np.nanmean(n_vals)),
+                "ndwi_mean": float(np.nanmean(w_vals)),
             }
         )
     return pd.DataFrame.from_records(records)
@@ -229,6 +245,66 @@ def add_normalized_columns(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
         else:
             out[f"{col}_z"] = (out[col] - float(out[col].mean())) / std
     return out
+
+
+def sample_for_plot(df: pd.DataFrame, max_points: int) -> pd.DataFrame:
+    if len(df) <= max_points:
+        return df
+    return df.sample(n=max_points, random_state=42).reset_index(drop=True)
+
+
+def plot_feature_comparison(
+    df: pd.DataFrame, feature_cols: list[str], out_path: Path, max_points: int
+) -> None:
+    import matplotlib.pyplot as plt
+
+    plot_df = sample_for_plot(df, max_points=max_points)
+    n = len(feature_cols)
+    fig, axes = plt.subplots(nrows=n, ncols=n, figsize=(3.2 * n, 3.2 * n))
+
+    for row_idx, ycol in enumerate(feature_cols):
+        for col_idx, xcol in enumerate(feature_cols):
+            ax = axes[row_idx, col_idx]
+            if row_idx == col_idx:
+                ax.hist(plot_df[xcol].to_numpy(dtype=float), bins=40, color="#4C78A8", alpha=0.85)
+            elif row_idx > col_idx:
+                ax.scatter(
+                    plot_df[xcol].to_numpy(dtype=float),
+                    plot_df[ycol].to_numpy(dtype=float),
+                    s=5,
+                    alpha=0.2,
+                    color="#1B9E77",
+                    linewidths=0,
+                )
+            else:
+                corr = plot_df[[xcol, ycol]].corr().iloc[0, 1]
+                ax.text(
+                    0.5,
+                    0.5,
+                    f"r = {corr:.2f}",
+                    ha="center",
+                    va="center",
+                    fontsize=12,
+                    color="#333333",
+                    transform=ax.transAxes,
+                )
+                ax.set_xticks([])
+                ax.set_yticks([])
+
+            if row_idx == n - 1:
+                ax.set_xlabel(xcol)
+            else:
+                ax.set_xticklabels([])
+            if col_idx == 0:
+                ax.set_ylabel(ycol)
+            else:
+                ax.set_yticklabels([])
+
+    fig.suptitle("Feature Comparison Matrix", fontsize=16)
+    fig.tight_layout()
+    fig.subplots_adjust(top=0.96)
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
 
 
 def main() -> None:
@@ -252,6 +328,7 @@ def main() -> None:
         rg_contrast_path = feature_index.get((chip_root, "rg_contrast"))
         texture_path = feature_index.get((chip_root, "texture"))
         ndvi_path = feature_index.get((chip_root, "ndvi"))
+        ndwi_path = feature_index.get((chip_root, "ndwi"))
 
         missing = []
         if brightness_path is None:
@@ -262,6 +339,8 @@ def main() -> None:
             missing.append("texture")
         if ndvi_path is None:
             missing.append("ndvi")
+        if ndwi_path is None:
+            missing.append("ndwi")
         if missing:
             missing_features.append(f"{chip_root}: missing {', '.join(missing)}")
             continue
@@ -272,6 +351,7 @@ def main() -> None:
             rg_contrast_path,
             texture_path,
             ndvi_path,
+            ndwi_path,
             args,
         )
         if not frame.empty:
@@ -280,24 +360,32 @@ def main() -> None:
     if not all_frames:
         raise RuntimeError(
             "No features were extracted. Check chip root parsing and raster naming "
-            "(expects chip_r###_c###_###### + brightness/rg_contrast/texture/ndvi "
+            "(expects chip_r###_c###_###### + brightness/rg_contrast/texture/ndvi/ndwi "
             "in file or folder names)."
         )
 
     features_df = pd.concat(all_frames, ignore_index=True)
+    feature_value_cols = [
+        "brightness_mean",
+        "rg_contrast_mean",
+        "texture_mean",
+        "ndvi_mean",
+        "ndwi_mean",
+    ]
     features_df = add_normalized_columns(
         features_df,
-        [
-            "brightness_mean",
-            "rg_contrast_mean",
-            "texture_mean",
-            "ndvi_mean",
-            "segment_area_m2",
-        ],
+        feature_value_cols + ["segment_area_m2"],
     )
 
     out_csv = args.output_dir / "segment_features_for_clustering.csv"
     features_df.to_csv(out_csv, index=False)
+    comparison_path = args.output_dir / "feature_comparison_matrix.png"
+    plot_feature_comparison(
+        features_df,
+        feature_value_cols,
+        comparison_path,
+        max_points=args.max_plot_points,
+    )
 
     missing_path = args.output_dir / "missing_features_by_chip.txt"
     missing_path.write_text("\n".join(missing_features), encoding="utf-8")
@@ -306,6 +394,7 @@ def main() -> None:
     print(f"Rasters discovered (recursive): {len(raster_files)}")
     print(f"Segments with extracted features: {len(features_df)}")
     print(f"Wrote: {out_csv.resolve()}")
+    print(f"Wrote feature comparison figure: {comparison_path.resolve()}")
     print(f"Wrote missing-feature report: {missing_path.resolve()}")
 
 

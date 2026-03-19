@@ -39,6 +39,7 @@ def parse_args() -> argparse.Namespace:
             "rg_contrast_mean_z",
             "texture_mean_z",
             "ndvi_mean_z",
+            "ndwi_mean_z",
             "segment_area_m2_z",
         ],
         help="Feature columns used to compute centroid distances.",
